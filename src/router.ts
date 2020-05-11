@@ -47,7 +47,7 @@ export interface NewRouterOptions<Match, Options, Request, Response, MRequest = 
         | Promise<MatchHandler<Match, MRequest, Response> | undefined>
 }
 
-export const router = <M, O, Req, Res, MReq>({
+export const router = <M, O, Req, Res, MReq = Req>({
     matches,
     mutateRequest,
     response,

@@ -3,30 +3,28 @@ A small package for building custom multipurpose routers, similar to [express.js
 # Quick Start
 
 ```javascript
-
 import { router } from "router-basic"
 
 const testRouter = router({
-    matches: (str, req) => str === request.endpoint
+    matches: (str, req) => str === req.endpoint,
     response: {
-        log: console.log
-    }
+        log: console.log,
+    },
 })
 
 const app = testRouter()
 
-app.handle('hello-world', (req, res) => {
-    res.log('Found the hello world endpoint!')
+app.handle("hello-world", (req, res) => {
+    res.log("Found the hello world endpoint!")
 })
 
-app.handle('goodbye-world', (req, res) => {
-    res.log('Looks like we\'re leaving, huh...')
+app.handle("goodbye-world", (req, res) => {
+    res.log("Looks like we're leaving, huh...")
 })
 
-app.emit({ endpoint: 'hello-world' })
+app.emit({ endpoint: "hello-world" })
 // Found the hello world endpoint!
 
-app.emit({ endpoint: 'goodbye-world' })
+app.emit({ endpoint: "goodbye-world" })
 // Looks like we're leaving, huh...
-
 ```
