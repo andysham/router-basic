@@ -12,7 +12,7 @@ const testRouter = router({
     },
 })
 
-const app = testRouter()
+const app = testRouter({})
 
 app.handle("hello-world", (req, res) => {
     res.log("Found the hello world endpoint!")

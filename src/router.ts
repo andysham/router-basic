@@ -1,71 +1,42 @@
-import { App } from "./app"
 import { RouterError } from "./error"
-import { asyncFilter, externalPromise } from "./util"
-
-export type Middleware<Req, Res> = (req: Req, res: Res, next: () => void) => Promise<void>
-export type Handler<Req, Res> = (req: Req, res: Res) => Promise<void>
-export interface MatchHandler<Match, Req, Res> {
-    match: Match
-    handler: (req: Req, res: Res) => Promise<void>
-}
+import { asyncFilter, externalPromise, asyncFind, isBoolean, toAsync } from "./util"
+import { NewRouterOptions, Middleware, Handler, MatchHandler, App } from "./types"
+import { MATCH_ALL } from "./const"
 
 /**
- * The input options for the new router factory function.
- *
- * `Match` - The type of a match parameter
- *
- * `Options` - The options type for the resultant router creator
- *
- * `Request` - The type of the request
- *
- * `Response` - The type of the response utility object given to the user in endpoints
- *
- * `MRequest` - Mutated request, the type of the request received by the user in endpoints, by default the same as the input request.
+ * A router factory function.
+ * @param o The factory options object.
+ * @param o.matches A function which specifies when a match parameter should satisfy and incoming request
+ * @param o.mutateRequest Takes an incoming request and mutates it for consumption by middleware and endpoints
+ * @param o.response Generates a response object to be given to each middleware and endpoint
+ * @param o.preferredHandler Decides which endpoint handler best fits the incoming request. Defaults to the first satisfying match, and if none exist, the global MATCH_ALL endpoint.
+ * @returns A router function which takes the described options object, and returns an 'app'.
  */
-export interface NewRouterOptions<Match, Options, Request, Response, MRequest = Request> {
-    matches: (match: Match, request: Request, options: Options) => boolean | Promise<boolean>
-    mutateRequest?: (
-        request: Request,
-        options: Options,
-        match: Match
-    ) => MRequest | Promise<MRequest>
-    response:
-        | Response
-        | ((
-              match: Match,
-              request: Request,
-              options: Options,
-              mutatedRequest: MRequest
-          ) => Response | Promise<Response>)
-    preferredHandler?: (
-        handlers: MatchHandler<Match, MRequest, Response>[],
-        request: Request,
-        options: Options
-    ) =>
-        | MatchHandler<Match, MRequest, Response>
-        | undefined
-        | Promise<MatchHandler<Match, MRequest, Response> | undefined>
-}
-
-export const router = <M, O, Req, Res, MReq = Req>({
+export const router = <M, O, Req, Res, Ret = void, MReq = Req>({
     matches,
     mutateRequest,
     response,
     preferredHandler,
-}: NewRouterOptions<M, O, Req, Res, MReq>) => (options: O): App<M, Req, Res, MReq> => {
-    const middleware: { match: M; handler: Middleware<MReq, Res> }[] = []
-    const handlers = new Map<M, Handler<MReq, Res>>()
-    const toAsync = <A extends any[], R>(
-        f: (...args: A) => R | Promise<R>
-    ): ((...args: A) => Promise<R>) => {
-        return async (...args): Promise<R> => {
-            const r = f(...args)
-            return r instanceof Promise ? await r : r
-        }
+    captureReturn,
+}: NewRouterOptions<M, O, Req, Res, Ret, MReq>) => (
+    options: O | ((req: Req) => O | Promise<O>)
+): App<M, O, Req, Res, Ret, MReq> => {
+    // Middleware / Endpoint handler store
+    const middleware: { match: M; handler: Middleware<MReq, Res, O> }[] = []
+    const handlers = new Map<M, Handler<MReq, Res, Ret, O>>()
+
+    // Declaring defaults to input parameters
+    const getResponse = response instanceof Function ? toAsync(response) : async () => response
+
+    const getMatches = async (
+        match: M | typeof MATCH_ALL,
+        request: Req,
+        options: O
+    ): Promise<boolean> => {
+        if (match === MATCH_ALL) return true
+        return await toAsync(matches)(match, request, options)
     }
 
-    const getResponse = response instanceof Function ? toAsync(response) : async () => response
-    const getMatches = toAsync(matches)
     const getRequest = mutateRequest
         ? toAsync(mutateRequest)
         : async (req: Req): Promise<MReq> => {
@@ -75,25 +46,42 @@ export const router = <M, O, Req, Res, MReq = Req>({
     const getPreferredHandler = preferredHandler
         ? toAsync(preferredHandler)
         : async (
-              handlers: MatchHandler<M, MReq, Res>[],
+              handlers: MatchHandler<M, MReq, Res, Ret, O>[],
               request: Req,
               options: O
-          ): Promise<MatchHandler<M, MReq, Res> | undefined> => {
-              return handlers.find(({ match }) => matches(match, request, options))
+          ): Promise<MatchHandler<M, MReq, Res, Ret, O> | undefined> => {
+              return asyncFind(handlers, ({ match }) => getMatches(match, request, options))
           }
 
+    const getCaptureReturn = captureReturn ? toAsync(captureReturn) : async () => {}
+
+    const getOptions = options instanceof Function ? toAsync(options) : async () => options
+
+    // Actual object
     return {
         async emit(req) {
-            for (const { match, handler } of await asyncFilter(middleware, ({ match }) =>
-                getMatches(match, req, options)
+            const options = await getOptions(req)
+            // Handle middlewares
+            for (const { match, handler } of await asyncFilter(
+                middleware,
+                async ({ match }) => await getMatches(match, req, options)
             )) {
                 const request = await getRequest(req, options, match)
                 const response = await getResponse(match, req, options, request)
-                const { promise: onNext, res: next } = externalPromise<undefined>()
-                const p = handler(request, response, () => next(undefined))
-                await Promise.race([p, onNext])
+                const { promise: onNext, res: next } = externalPromise<boolean>()
+                const p = async () => {
+                    const cont = await handler(
+                        request,
+                        response,
+                        (cont?: boolean) => next(cont ?? true),
+                        options
+                    )
+                    return isBoolean(cont) ? cont : true
+                }
+                if (!(await Promise.race([p(), onNext]))) return
             }
 
+            // Handle endpoint
             const matchhandler = await getPreferredHandler(
                 [...handlers.entries()].map(([match, handler]) => ({ match, handler })),
                 req,
@@ -103,13 +91,24 @@ export const router = <M, O, Req, Res, MReq = Req>({
                 const { match, handler } = matchhandler
                 const request = await getRequest(req, options, match)
                 const response = await getResponse(match, req, options, request)
-                await handler(request, response)
+                const ret = await handler(request, response, options)
+                if (ret !== undefined) await getCaptureReturn(ret, request, response, options)
             }
         },
-        use(match, handler) {
+        use() {
+            // Declare middleware
+            const { match, handler } =
+                arguments.length === 2
+                    ? { match: arguments[0], handler: arguments[1] }
+                    : { match: MATCH_ALL, handler: arguments[0] }
             middleware.push({ match, handler: toAsync(handler) })
         },
-        handle(match, handler) {
+        handle() {
+            // Declare endpoint
+            const { match, handler } =
+                arguments.length === 2
+                    ? { match: arguments[0], handler: arguments[1] }
+                    : { match: MATCH_ALL, handler: arguments[0] }
             if (handlers.has(match))
                 throw new RouterError(
                     `Match ${match} already represented by a handler, you cannot have two handlers for the same match.`
